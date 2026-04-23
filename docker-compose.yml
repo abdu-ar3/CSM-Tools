@@ -1,0 +1,39 @@
+services:
+  csmtools:
+    build:
+      context: .
+    container_name: csmtools
+    restart: unless-stopped
+    environment:
+      - PORT=3000
+      - DB_PATH=/data/csm_database.sqlite
+    ports:
+      - "127.0.0.1:3010:3000"
+    volumes:
+      - csmtools_data:/data
+    networks:
+      - coolify
+    labels:
+      - traefik.enable=true
+
+      # HTTP -> HTTPS redirect
+      - traefik.http.routers.csmtools-http.rule=Host(`csmtools.virtuenet.space`)
+      - traefik.http.routers.csmtools-http.entrypoints=http
+      - traefik.http.routers.csmtools-http.middlewares=redirect-to-https
+      - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+
+      # HTTPS router (Let's Encrypt)
+      - traefik.http.routers.csmtools.rule=Host(`csmtools.virtuenet.space`)
+      - traefik.http.routers.csmtools.entrypoints=https
+      - traefik.http.routers.csmtools.tls=true
+      - traefik.http.routers.csmtools.tls.certresolver=letsencrypt
+
+      # Service port inside the container
+      - traefik.http.services.csmtools.loadbalancer.server.port=3000
+
+volumes:
+  csmtools_data:
+
+networks:
+  coolify:
+    external: true
