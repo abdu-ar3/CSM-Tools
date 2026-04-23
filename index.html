@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSM Admin Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Unicons for icons -->
+    <link rel="stylesheet" href="https://unicons.iconscout.com/release/v4.0.8/css/line.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon"><i class="uil uil-rocket"></i></div>
+                    <h2>Admin <span>CSM</span></h2>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <ul>
+                    <li class="nav-item active" data-view="dashboard">
+                        <a href="#"><i class="uil uil-dashboard"></i> <span>Dashboard</span></a>
+                    </li>
+                    <li class="nav-item" data-view="dataList">
+                        <a href="#"><i class="uil uil-database"></i> <span>Data CSM</span></a>
+                    </li>
+                    <li class="nav-item" data-view="importData">
+                        <a href="#"><i class="uil uil-import"></i> <span>Import Data</span></a>
+                    </li>
+                </ul>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-profile">
+                    <img src="https://ui-avatars.com/api/?name=Admin+User&background=3b82f6&color=fff" alt="User">
+                    <div class="user-info">
+                        <h4>Admin User</h4>
+                        <p>Superadmin</p>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="topbar">
+                <div class="search-bar">
+                    <i class="uil uil-search"></i>
+                    <input type="text" placeholder="Search data, clients...">
+                </div>
+                <div class="topbar-actions">
+                    <button class="btn-icon"><i class="uil uil-bell"></i></button>
+                    <button class="btn-icon"><i class="uil uil-setting"></i></button>
+                </div>
+            </header>
+
+            <div class="content-view" id="app-content">
+                <!-- Dynamic Content Will Be Injected Here via JS -->
+            </div>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <!-- View Modules -->
+    <script src="js/views/Dashboard.js"></script>
+    <script src="js/views/DataList.js"></script>
+    <script src="js/views/ImportData.js"></script>
+    <!-- Core App JS -->
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+node_modules/
+csm_database.sqlite
+.env
