@@ -5,7 +5,10 @@ window.App.views.dataList = {
             <div class="will-animate">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
                     <h2>CSM Data List</h2>
-                    <button class="btn btn-primary" id="btnShowAddClient"><i class="uil uil-plus"></i> Add New Client</button>
+                    <div style="display: flex; gap: 12px;">
+                        <button class="btn" id="btnSyncLark" style="background: var(--bg-card); border: 1px solid var(--primary); color: var(--primary);"><i class="uil uil-sync"></i> Sync to Lark Base</button>
+                        <button class="btn btn-primary" id="btnShowAddClient"><i class="uil uil-plus"></i> Add New Client</button>
+                    </div>
                 </div>
                 
                 <!-- Add Client Form (Hidden by default) -->
@@ -152,5 +155,21 @@ window.App.views.dataList = {
              btnCancel.click();
              await this.loadClientsOutput();
         });
+
+        const btnSync = document.getElementById('btnSyncLark');
+        if(btnSync) {
+            btnSync.addEventListener('click', async () => {
+                btnSync.disabled = true;
+                btnSync.innerHTML = '<i class="uil uil-spinner"></i> Syncing...';
+                try {
+                    const result = await window.App.api.syncLark();
+                    alert(`Sync successful! Synced ${result.synced_records} records to Lark Base.`);
+                } catch(err) {
+                    alert(`Sync failed: ${err.message}`);
+                }
+                btnSync.disabled = false;
+                btnSync.innerHTML = '<i class="uil uil-sync"></i> Sync to Lark Base';
+            });
+        }
     }
 };

@@ -7,9 +7,13 @@ window.App.views = window.App.views || {};
 
 Object.assign(window.App, {
     currentView: 'dashboard',
+    theme: 'dark',
+    user: null,
 
-    init() {
+    async init() {
         this.cacheDOM();
+        await this.loadUser();
+        await this.loadTheme();
         this.bindEvents();
         this.renderView(this.currentView);
     },
@@ -17,6 +21,39 @@ Object.assign(window.App, {
     cacheDOM() {
         this.navItems = document.querySelectorAll('.nav-item');
         this.contentArea = document.getElementById('app-content');
+        this.themeToggle = document.getElementById('btnThemeToggle');
+        this.userAvatar = document.getElementById('userAvatar');
+        this.userName = document.getElementById('userName');
+    },
+
+    async loadUser() {
+        try {
+            const response = await fetch('/api/user');
+            if (response.ok) {
+                const data = await response.json();
+                this.user = data.user;
+                this.updateUserUI();
+            } else {
+                // Not authenticated, redirect to login
+                window.location.href = '/login';
+            }
+        } catch (error) {
+            console.error('Error loading user:', error);
+            window.location.href = '/login';
+        }
+    },
+
+    updateUserUI() {
+        if (this.user && this.userAvatar && this.userName) {
+            if (this.user.avatar) {
+                this.userAvatar.src = this.user.avatar;
+            } else {
+                // Generate avatar from name
+                const name = this.user.name || 'User';
+                this.userAvatar.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=3b82f6&color=fff`;
+            }
+            this.userName.textContent = this.user.name || 'User';
+        }
     },
 
     bindEvents() {
@@ -30,6 +67,12 @@ Object.assign(window.App, {
                 }
             });
         });
+
+        if (this.themeToggle) {
+            this.themeToggle.addEventListener('click', () => {
+                this.toggleTheme();
+            });
+        }
     },
 
     setActiveNav(activeItem) {
@@ -68,6 +111,41 @@ Object.assign(window.App, {
             });
 
         }, 200);
+    },
+
+    async loadTheme() {
+        let theme = localStorage.getItem('ui_theme') || 'dark';
+        try {
+            const config = await this.api.getConfig();
+            if (config.ui_theme) theme = config.ui_theme;
+        } catch (err) {
+            console.warn('Unable to load theme config', err);
+        }
+        this.setTheme(theme);
+    },
+
+    setTheme(theme) {
+        const normalized = theme === 'light' ? 'light' : 'dark';
+        this.theme = normalized;
+        document.documentElement.setAttribute('data-theme', normalized);
+        localStorage.setItem('ui_theme', normalized);
+        this.updateThemeToggleIcon();
+    },
+
+    toggleTheme() {
+        const nextTheme = this.theme === 'dark' ? 'light' : 'dark';
+        this.setTheme(nextTheme);
+    },
+
+    updateThemeToggleIcon() {
+        if (!this.themeToggle) {
+            this.themeToggle = document.getElementById('btnThemeToggle');
+        }
+        if (!this.themeToggle) return;
+
+        const iconClass = this.theme === 'dark' ? 'uil-sun' : 'uil-moon';
+        this.themeToggle.innerHTML = `<i class="uil ${iconClass}"></i>`;
+        this.themeToggle.title = this.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
     }
 });
 

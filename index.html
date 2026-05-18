@@ -29,8 +29,23 @@
                     <li class="nav-item" data-view="dataList">
                         <a href="#"><i class="uil uil-database"></i> <span>Data CSM</span></a>
                     </li>
+                    <li class="nav-item" data-view="customerIssues">
+                        <a href="#"><i class="uil uil-exclamation-octagon"></i> <span>Customer Issues</span></a>
+                    </li>
+                    <li class="nav-item" data-view="projectClosedWon">
+                        <a href="#"><i class="uil uil-briefcase-alt"></i> <span>Project Closed Won</span></a>
+                    </li>
+                    <li class="nav-item" data-view="customerOverview">
+                        <a href="#"><i class="uil uil-users-alt"></i> <span>Customer Overview</span></a>
+                    </li>
+                    <li class="nav-item" data-view="timeline">
+                        <a href="#"><i class="uil uil-history"></i> <span>Timeline</span></a>
+                    </li>
                     <li class="nav-item" data-view="importData">
                         <a href="#"><i class="uil uil-import"></i> <span>Import Data</span></a>
+                    </li>
+                    <li class="nav-item" data-view="settings">
+                        <a href="#"><i class="uil uil-setting"></i> <span>Configuration</span></a>
                     </li>
                 </ul>
             </nav>
@@ -52,10 +67,19 @@
                     <i class="uil uil-search"></i>
                     <input type="text" placeholder="Search data, clients...">
                 </div>
-                <div class="topbar-actions">
-                    <button class="btn-icon"><i class="uil uil-bell"></i></button>
-                    <button class="btn-icon"><i class="uil uil-setting"></i></button>
+            <div class="topbar-actions">
+                <button class="btn-icon"><i class="uil uil-bell"></i></button>
+                <button class="btn-icon"><i class="uil uil-setting"></i></button>
+                <div class="user-menu">
+                    <img id="userAvatar" src="https://ui-avatars.com/api/?name=User&background=3b82f6&color=fff" alt="User" class="user-avatar">
+                    <div class="user-dropdown">
+                        <span id="userName">Loading...</span>
+                        <a href="/logout" class="logout-link">
+                            <i class="uil uil-sign-out-alt"></i> Logout
+                        </a>
+                    </div>
                 </div>
+            </div>
             </header>
 
             <div class="content-view" id="app-content">
@@ -68,7 +92,12 @@
     <!-- View Modules -->
     <script src="js/views/Dashboard.js"></script>
     <script src="js/views/DataList.js"></script>
+    <script src="js/views/ProjectClosedWon.js"></script>
+    <script src="js/views/CustomerOverview.js"></script>
+    <script src="js/views/Timeline.js"></script>
+    <script src="js/views/CustomerIssues.js"></script>
     <script src="js/views/ImportData.js"></script>
+    <script src="js/views/Settings.js"></script>
     <!-- Core App JS -->
     <script src="js/api.js"></script>
     <script src="js/app.js"></script>

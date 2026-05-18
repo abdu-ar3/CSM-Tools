@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - CSM Admin Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unicons.iconscout.com/release/v4.0.8/css/line.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+            padding: 3rem;
+            text-align: center;
+            max-width: 400px;
+            width: 100%;
+        }
+
+        .logo {
+            margin-bottom: 2rem;
+        }
+
+        .logo-icon {
+            font-size: 4rem;
+            color: #3b82f6;
+            margin-bottom: 1rem;
+        }
+
+        .logo h1 {
+            font-size: 2rem;
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+        }
+
+        .logo p {
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
+
+        .login-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.75rem;
+            background: #00d4aa;
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            margin-top: 1.5rem;
+        }
+
+        .login-btn:hover {
+            background: #00b894;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0, 212, 170, 0.3);
+        }
+
+        .login-btn i {
+            font-size: 1.2rem;
+        }
+
+        .divider {
+            margin: 2rem 0;
+            position: relative;
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
+
+        .divider::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: #e5e7eb;
+        }
+
+        .divider span {
+            background: white;
+            padding: 0 1rem;
+        }
+
+        .features {
+            text-align: left;
+            margin-top: 2rem;
+        }
+
+        .features h3 {
+            color: #1f2937;
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+        }
+
+        .features ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .features li {
+            color: #6b7280;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .features li i {
+            color: #10b981;
+            font-size: 0.8rem;
+        }
+
+        @media (max-width: 480px) {
+            .login-container {
+                margin: 1rem;
+                padding: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <div class="logo-icon">
+                <i class="uil uil-rocket"></i>
+            </div>
+            <h1>CSM Admin</h1>
+            <p>Customer Success Management Dashboard</p>
+        </div>
+
+        <a href="/auth/lark" class="login-btn">
+            <i class="uil uil-sign-in"></i>
+            Login dengan Lark
+        </a>
+
+        <div class="divider">
+            <span>Secure Access</span>
+        </div>
+
+        <div class="features">
+            <h3>Dashboard Features</h3>
+            <ul>
+                <li><i class="uil uil-check"></i> Customer Health Monitoring</li>
+                <li><i class="uil uil-check"></i> Issue Tracking & Resolution</li>
+                <li><i class="uil uil-check"></i> Project Management</li>
+                <li><i class="uil uil-check"></i> Data Import & Analytics</li>
+                <li><i class="uil uil-check"></i> Real-time Timeline</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
