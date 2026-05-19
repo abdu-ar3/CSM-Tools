@@ -416,6 +416,85 @@ const ensureTimelineForProject = (recordId) => new Promise((resolve, reject) => 
     });
 });
 
+// API: Get Lark organization users for PIC assignment
+// Cache users for 5 minutes to avoid excessive API calls
+let larkUsersCache = { data: null, timestamp: 0 };
+const LARK_USERS_CACHE_TTL = 5 * 60 * 1000;
+
+app.get('/api/lark-users', requireAuth, async (req, res) => {
+    try {
+        // Return cached data if still fresh
+        if (larkUsersCache.data && (Date.now() - larkUsersCache.timestamp) < LARK_USERS_CACHE_TTL) {
+            return res.json({ data: larkUsersCache.data });
+        }
+
+        const config = await getConfig();
+        if (!config.lark_app_id || !config.lark_app_secret) {
+            return res.status(400).json({ error: 'Lark Configuration is incomplete' });
+        }
+
+        // Get tenant_access_token
+        const authRes = await fetch('https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                app_id: config.lark_app_id,
+                app_secret: config.lark_app_secret
+            })
+        });
+        const authData = await authRes.json();
+        if (!authData.tenant_access_token) {
+            return res.status(400).json({ error: 'Failed to authenticate with Lark', details: authData });
+        }
+
+        // Fetch users from root department (department_id=0 = all users)
+        let allUsers = [];
+        let pageToken = '';
+        let hasMore = true;
+
+        while (hasMore) {
+            const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/find_by_department');
+            url.searchParams.append('department_id', '0');
+            url.searchParams.append('page_size', '50');
+            if (pageToken) url.searchParams.append('page_token', pageToken);
+
+            const usersRes = await fetch(url.toString(), {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${authData.tenant_access_token}` }
+            });
+            const usersData = await usersRes.json();
+
+            if (usersData.code !== 0) {
+                console.error('Lark users API error:', usersData);
+                return res.status(400).json({
+                    error: 'Failed to fetch users from Lark. Make sure the app has "Read Contacts" permission.',
+                    details: usersData
+                });
+            }
+
+            const items = usersData.data?.items || [];
+            allUsers = allUsers.concat(items.map(user => ({
+                user_id: user.user_id,
+                name: user.name,
+                email: user.email || '',
+                avatar: user.avatar?.avatar_72 || user.avatar?.avatar_origin || '',
+                department: user.department_ids?.[0] || ''
+            })));
+
+            hasMore = usersData.data?.has_more || false;
+            pageToken = usersData.data?.page_token || '';
+        }
+
+        // Cache the results
+        larkUsersCache = { data: allUsers, timestamp: Date.now() };
+        res.json({ data: allUsers });
+
+    } catch (err) {
+        console.error('Error fetching Lark users:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // API: Sync to Lark
 app.post('/api/sync-lark', async (req, res) => {
     const getClients = () => new Promise((resolve, reject) => {

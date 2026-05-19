@@ -13,6 +13,18 @@ window.App.api = {
             return [];
         }
     },
+
+    async getLarkUsers() {
+        try {
+            const response = await fetch(`${API_URL}/lark-users`);
+            if (!response.ok) throw new Error('Failed to fetch Lark users');
+            const data = await response.json();
+            return data.data || [];
+        } catch (error) {
+            console.error('Error fetching Lark users:', error);
+            return [];
+        }
+    },
     
     async addClient(clientData) {
         const response = await fetch(`${API_URL}/clients`, {
