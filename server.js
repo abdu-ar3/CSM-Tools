@@ -2,8 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const session = require('express-session');
-const passport = require('passport');
-const OAuth2Strategy = require('passport-oauth2');
 const axios = require('axios');
 const db = require('./database');
 
@@ -11,67 +9,46 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Lark OAuth Configuration
-const LARK_CLIENT_ID = 'cli_a9636165c6ba5ed3';
-const LARK_CLIENT_SECRET = '6ZpkRpUkQWJ3YqOzw2phPeTJyhlk1UTp';
-const LARK_REDIRECT_URI = 'http://localhost:3000/auth/lark/callback';
+const LARK_APP_ID = 'cli_a9636165c6ba5ed3';
+const LARK_APP_SECRET = '6ZpkRpUkQWJ3YqOzw2phPeTJyhlk1UTp';
+const LARK_REDIRECT_URI = process.env.LARK_REDIRECT_URI || 'http://localhost:3000/auth/lark/callback';
 
-// Configure Passport with Lark OAuth2
-passport.use(new OAuth2Strategy({
-    authorizationURL: 'https://open.larksuite.com/open-apis/authen/v1/authorize',
-    tokenURL: 'https://open.larksuite.com/open-apis/authen/v1/access_token',
-    clientID: LARK_CLIENT_ID,
-    clientSecret: LARK_CLIENT_SECRET,
-    callbackURL: LARK_REDIRECT_URI,
-    scope: ['user.read']
-  },
-  function(accessToken, refreshToken, profile, done) {
-    // Get user info from Lark
-    axios.get('https://open.larksuite.com/open-apis/authen/v1/user_info', {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      }
-    })
-    .then(response => {
-      const userData = response.data;
-      const user = {
-        id: userData.data.user_id,
-        name: userData.data.name,
-        email: userData.data.email,
-        avatar: userData.data.avatar_url,
-        accessToken: accessToken
-      };
-      return done(null, user);
-    })
-    .catch(err => {
-      console.error('Error getting user info:', err);
-      return done(err, null);
+// Lark API Endpoints
+const LARK_AUTH_URL = 'https://open.larksuite.com/open-apis/authen/v1/authorize';
+const LARK_APP_TOKEN_URL = 'https://open.larksuite.com/open-apis/auth/v3/app_access_token/internal';
+const LARK_USER_TOKEN_URL = 'https://open.larksuite.com/open-apis/authen/v1/access_token';
+const LARK_USER_INFO_URL = 'https://open.larksuite.com/open-apis/authen/v1/user_info';
+
+// Helper: Get Lark app_access_token (required before exchanging code for user token)
+async function getAppAccessToken() {
+    const response = await axios.post(LARK_APP_TOKEN_URL, {
+        app_id: LARK_APP_ID,
+        app_secret: LARK_APP_SECRET
+    }, {
+        headers: { 'Content-Type': 'application/json' }
     });
-  }
-));
 
-passport.serializeUser(function(user, done) {
-  done(null, user);
-});
-
-passport.deserializeUser(function(user, done) {
-  done(null, user);
-});
+    if (!response.data || !response.data.app_access_token) {
+        throw new Error('Failed to obtain app_access_token from Lark: ' + JSON.stringify(response.data));
+    }
+    return response.data.app_access_token;
+}
 
 app.use(cors());
 app.use(express.json());
 app.use(session({
-  secret: 'csm-dashboard-secret-key',
+  secret: process.env.SESSION_SECRET || 'csm-dashboard-secret-key',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: false } // Set to true in production with HTTPS
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax'
+  }
 }));
-app.use(passport.initialize());
-app.use(passport.session());
 
 // Middleware to check authentication
 function requireAuth(req, res, next) {
-  if (req.isAuthenticated()) {
+  if (req.session && req.session.user) {
     return next();
   }
   res.redirect('/login');
@@ -83,9 +60,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Trust proxy (needed behind Traefik/reverse proxy for secure cookies)
+app.set('trust proxy', 1);
+
 // Routes
 app.get('/', (req, res) => {
-  if (req.isAuthenticated()) {
+  if (req.session && req.session.user) {
     res.sendFile(path.join(__dirname, 'index.html'));
   } else {
     res.redirect('/login');
@@ -93,23 +73,102 @@ app.get('/', (req, res) => {
 });
 
 app.get('/login', (req, res) => {
+  if (req.session && req.session.user) {
+    return res.redirect('/');
+  }
   res.sendFile(path.join(__dirname, 'login.html'));
 });
 
 // Lark OAuth routes
-app.get('/auth/lark',
-  passport.authenticate('oauth2'));
+// Step 1: Redirect user to Lark authorization page
+app.get('/auth/lark', (req, res) => {
+  // Generate a random state to prevent CSRF
+  const state = Math.random().toString(36).substring(2, 15);
+  req.session.oauthState = state;
 
-app.get('/auth/lark/callback',
-  passport.authenticate('oauth2', { failureRedirect: '/login' }),
-  function(req, res) {
-    // Successful authentication, redirect to dashboard
+  const authUrl = `${LARK_AUTH_URL}?app_id=${LARK_APP_ID}&redirect_uri=${encodeURIComponent(LARK_REDIRECT_URI)}&state=${state}`;
+  console.log('Redirecting to Lark auth:', authUrl);
+  res.redirect(authUrl);
+});
+
+// Step 2: Handle callback from Lark
+app.get('/auth/lark/callback', async (req, res) => {
+  const { code, state } = req.query;
+
+  // Validate state to prevent CSRF
+  if (!state || state !== req.session.oauthState) {
+    console.error('OAuth state mismatch. Expected:', req.session.oauthState, 'Got:', state);
+    return res.redirect('/login?error=state_mismatch');
+  }
+  delete req.session.oauthState;
+
+  if (!code) {
+    console.error('No authorization code received from Lark');
+    return res.redirect('/login?error=no_code');
+  }
+
+  try {
+    // Step 2a: Get app_access_token
+    const appAccessToken = await getAppAccessToken();
+    console.log('Got app_access_token successfully');
+
+    // Step 2b: Exchange code for user_access_token
+    const tokenResponse = await axios.post(LARK_USER_TOKEN_URL, {
+      grant_type: 'authorization_code',
+      code: code
+    }, {
+      headers: {
+        'Authorization': `Bearer ${appAccessToken}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const tokenData = tokenResponse.data;
+    if (tokenData.code !== 0) {
+      console.error('Failed to exchange code for user token:', tokenData);
+      return res.redirect('/login?error=token_exchange_failed');
+    }
+
+    const userAccessToken = tokenData.data.access_token;
+    console.log('Got user_access_token successfully');
+
+    // Step 2c: Fetch user info
+    const userInfoResponse = await axios.get(LARK_USER_INFO_URL, {
+      headers: {
+        'Authorization': `Bearer ${userAccessToken}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const userInfoData = userInfoResponse.data;
+    if (userInfoData.code !== 0) {
+      console.error('Failed to get user info:', userInfoData);
+      return res.redirect('/login?error=user_info_failed');
+    }
+
+    // Save user to session
+    req.session.user = {
+      id: userInfoData.data.user_id,
+      name: userInfoData.data.name,
+      email: userInfoData.data.email,
+      avatar: userInfoData.data.avatar_url,
+      accessToken: userAccessToken
+    };
+
+    console.log('User logged in successfully:', req.session.user.name);
     res.redirect('/');
-  });
+
+  } catch (error) {
+    console.error('Lark OAuth error:', error.response?.data || error.message);
+    res.redirect('/login?error=auth_failed');
+  }
+});
 
 app.get('/logout', (req, res) => {
-  req.logout(function(err) {
-    if (err) { return next(err); }
+  req.session.destroy((err) => {
+    if (err) {
+      console.error('Error destroying session:', err);
+    }
     res.redirect('/login');
   });
 });
@@ -124,7 +183,7 @@ app.use(express.static(__dirname));
 
 // API routes (protected)
 app.get('/api/user', requireAuth, (req, res) => {
-  res.json({ user: req.user });
+  res.json({ user: req.session.user });
 });
 
 // API: Get all clients
@@ -615,10 +674,7 @@ app.post('/api/project-pic/:recordId', (req, res) => {
     });
 });
 
-// Fallback to index.html for root path
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
+// Fallback removed — root route is already defined above with auth check
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

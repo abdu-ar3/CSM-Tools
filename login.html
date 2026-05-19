@@ -133,6 +133,22 @@
             font-size: 0.8rem;
         }
 
+        .error-alert {
+            background: #fef2f2;
+            border: 1px solid #fca5a5;
+            color: #dc2626;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            margin-bottom: 1rem;
+            animation: slideDown 0.3s ease-out;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
         @media (max-width: 480px) {
             .login-container {
                 margin: 1rem;
@@ -150,6 +166,8 @@
             <h1>CSM Admin</h1>
             <p>Customer Success Management Dashboard</p>
         </div>
+
+        <div id="errorAlert" class="error-alert" style="display: none;"></div>
 
         <a href="/auth/lark" class="login-btn">
             <i class="uil uil-sign-in"></i>
@@ -171,5 +189,23 @@
             </ul>
         </div>
     </div>
+
+    <script>
+        // Show error message if redirected with error parameter
+        const params = new URLSearchParams(window.location.search);
+        const error = params.get('error');
+        if (error) {
+            const errorMessages = {
+                'state_mismatch': 'Security validation failed. Please try again.',
+                'no_code': 'Authorization was cancelled or denied.',
+                'token_exchange_failed': 'Failed to complete login with Lark. Please try again.',
+                'user_info_failed': 'Could not retrieve your Lark profile. Check app permissions.',
+                'auth_failed': 'Authentication failed. Please try again.'
+            };
+            const alertEl = document.getElementById('errorAlert');
+            alertEl.textContent = errorMessages[error] || 'Login failed. Please try again.';
+            alertEl.style.display = 'block';
+        }
+    </script>
 </body>
 </html>
