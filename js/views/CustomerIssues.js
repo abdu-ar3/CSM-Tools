@@ -2,6 +2,77 @@ window.App = window.App || { views: {} };
 window.App.views.customerIssues = {
     render() {
         return `
+            <style>
+                .pic-display {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 8px;
+                    padding: 10px 14px;
+                    border-radius: var(--border-radius-sm);
+                    cursor: pointer;
+                    border: 1px solid var(--border-color);
+                    background: var(--bg-card);
+                    min-height: 42px;
+                }
+                .pic-display:hover {
+                    border-color: var(--primary, #3b82f6);
+                }
+                .pic-display img {
+                    width: 24px;
+                    height: 24px;
+                    border-radius: 50%;
+                    object-fit: cover;
+                }
+                .pic-display .pic-name {
+                    font-size: 0.9rem;
+                    font-weight: 500;
+                    color: var(--text-primary);
+                }
+                .pic-dropdown-search input {
+                    width: 100%;
+                    padding: 7px 10px;
+                    border: 1px solid var(--border-color);
+                    border-radius: 6px;
+                    outline: none;
+                    font-size: 0.85rem;
+                    background: var(--bg-sidebar, var(--bg-card));
+                    color: var(--text-primary);
+                }
+                .pic-option {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 8px 12px;
+                    cursor: pointer;
+                    transition: background 0.15s;
+                }
+                .pic-option:hover {
+                    background: var(--bg-hover, rgba(59,130,246,0.08));
+                }
+                .pic-option.selected {
+                    background: rgba(59,130,246,0.12);
+                }
+                .pic-option img {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    object-fit: cover;
+                }
+                .pic-option-info {
+                    flex: 1;
+                    min-width: 0;
+                }
+                .pic-option-name {
+                    font-size: 0.88rem;
+                    font-weight: 500;
+                    color: var(--text-primary);
+                }
+                .pic-option-email {
+                    font-size: 0.75rem;
+                    color: var(--text-secondary);
+                }
+            </style>
             <div class="will-animate">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;">
                     <div>
@@ -32,9 +103,19 @@ window.App.views.customerIssues = {
                                     <option value="Low">Low</option>
                                 </select>
                             </div>
-                            <div class="form-group">
+                            <div class="form-group" style="position: relative;">
                                 <label for="issueAssignedTo">Ditugaskan kepada</label>
-                                <input id="issueAssignedTo" name="assigned_to" class="form-control" type="text" placeholder="e.g. CSM Team" />
+                                <input type="hidden" id="issueAssignedTo" name="assigned_to" value="" />
+                                <div class="pic-display" id="issueAssignedToDisplay">
+                                    <span class="pic-placeholder" style="color: var(--text-secondary); font-style: italic;">Pilih Anggota Tim...</span>
+                                    <i class="uil uil-angle-down" style="color: var(--text-secondary);"></i>
+                                </div>
+                                <div class="pic-dropdown" id="issueAssignedToDropdown" style="position: absolute; top: 100%; left: 0; right: 0; max-height: 250px; overflow-y: auto; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--border-radius-sm); box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 10; display: none;">
+                                    <div class="pic-dropdown-search" style="padding: 8px; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; background: var(--bg-card);">
+                                        <input type="text" placeholder="Cari user..." id="issueAssignedToSearch" autocomplete="off" />
+                                    </div>
+                                    <div class="pic-dropdown-list" id="issueAssignedToOptionsList"></div>
+                                </div>
                             </div>
                             <div class="form-group">
                                 <label for="issueDescription">Deskripsi</label>
@@ -74,8 +155,16 @@ window.App.views.customerIssues = {
     },
 
     async afterRender() {
+        this.larkUsers = [];
+        try {
+            this.larkUsers = await window.App.api.getLarkUsers();
+        } catch (err) {
+            console.error('Error loading Lark users', err);
+        }
         this.bindEvents();
         await Promise.all([this.loadIssues(), this.loadCustomerOptions()]);
+        this.renderLarkUserOptions();
+        this.bindLarkUserEvents();
     },
 
     async loadCustomerOptions() {
@@ -143,6 +232,7 @@ window.App.views.customerIssues = {
                 try {
                     await window.App.api.createIssue(issueData);
                     issueForm.reset();
+                    this.selectLarkUser('', '');
                     issueForm.querySelector('#issuePriority').value = 'Medium';
                     await this.loadIssues();
                 } catch (err) {
@@ -221,5 +311,110 @@ window.App.views.customerIssues = {
     renderStatusBadge(status) {
         const color = status === 'Resolved' ? 'success' : status === 'In Progress' ? 'warning' : 'primary';
         return `<span class="badge ${color}">${status}</span>`;
+    },
+
+    renderUserAvatar(name) {
+        return 'https://ui-avatars.com/api/?name=' + encodeURIComponent(name) + '&background=3b82f6&color=fff&size=60';
+    },
+
+    renderLarkUserOptions(filter = '') {
+        const listContainer = document.getElementById('issueAssignedToOptionsList');
+        if (!listContainer) return;
+
+        const filtered = filter
+            ? this.larkUsers.filter(u => u.name.toLowerCase().includes(filter) || (u.email && u.email.toLowerCase().includes(filter)))
+            : this.larkUsers;
+
+        if (filtered.length === 0) {
+            listContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-secondary); font-size: 0.85rem;">No users found</div>';
+            return;
+        }
+
+        const selectedVal = document.getElementById('issueAssignedTo')?.value || '';
+
+        listContainer.innerHTML = filtered.map(user => {
+            const avatarSrc = user.avatar || this.renderUserAvatar(user.name);
+            const isSelected = user.name === selectedVal;
+            return `
+                <div class="pic-option ${isSelected ? 'selected' : ''}" data-user-name="${user.name}" data-avatar="${avatarSrc}">
+                    <img src="${avatarSrc}" alt="" onerror="this.src='${this.renderUserAvatar(user.name)}'" />
+                    <div class="pic-option-info">
+                        <div class="pic-option-name">${user.name}</div>
+                        ${user.email ? `<div class="pic-option-email">${user.email}</div>` : ''}
+                    </div>
+                    ${isSelected ? '<i class="uil uil-check" style="color: var(--primary, #3b82f6);"></i>' : ''}
+                </div>
+            `;
+        }).join('');
+
+        // Bind clicks on options
+        listContainer.querySelectorAll('.pic-option').forEach(opt => {
+            opt.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const userName = opt.dataset.userName;
+                const avatar = opt.dataset.avatar;
+                this.selectLarkUser(userName, avatar);
+            });
+        });
+    },
+
+    selectLarkUser(userName, avatar) {
+        const hiddenInput = document.getElementById('issueAssignedTo');
+        const displayEl = document.getElementById('issueAssignedToDisplay');
+        const dropdown = document.getElementById('issueAssignedToDropdown');
+
+        if (hiddenInput) hiddenInput.value = userName || '';
+        
+        if (displayEl) {
+            if (userName) {
+                displayEl.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <img src="${avatar}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;" onerror="this.src='${this.renderUserAvatar(userName)}'" />
+                        <span class="pic-name" style="font-size: 0.9rem; font-weight: 500; color: var(--text-primary);">${userName}</span>
+                    </div>
+                    <i class="uil uil-angle-down" style="color: var(--text-secondary);"></i>
+                `;
+            } else {
+                displayEl.innerHTML = `
+                    <span class="pic-placeholder" style="color: var(--text-secondary); font-style: italic;">Pilih Anggota Tim...</span>
+                    <i class="uil uil-angle-down" style="color: var(--text-secondary);"></i>
+                `;
+            }
+        }
+
+        if (dropdown) dropdown.style.display = 'none';
+        this.renderLarkUserOptions();
+    },
+
+    bindLarkUserEvents() {
+        const displayEl = document.getElementById('issueAssignedToDisplay');
+        const dropdown = document.getElementById('issueAssignedToDropdown');
+        const searchInput = document.getElementById('issueAssignedToSearch');
+
+        if (displayEl && dropdown) {
+            displayEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isShown = dropdown.style.display === 'block';
+                dropdown.style.display = isShown ? 'none' : 'block';
+                if (!isShown && searchInput) {
+                    searchInput.value = '';
+                    this.renderLarkUserOptions();
+                    setTimeout(() => searchInput.focus(), 50);
+                }
+            });
+        }
+
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                e.stopPropagation();
+                this.renderLarkUserOptions(searchInput.value.trim().toLowerCase());
+            });
+            searchInput.addEventListener('click', (e) => e.stopPropagation());
+        }
+
+        // Close when clicking outside
+        document.addEventListener('click', () => {
+            if (dropdown) dropdown.style.display = 'none';
+        });
     }
 };

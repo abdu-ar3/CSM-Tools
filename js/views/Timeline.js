@@ -4,6 +4,72 @@ window.App.views.timeline = {
 
     render() {
         return `
+            <style>
+                .pic-display {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 8px;
+                    padding: 8px 12px;
+                    border-radius: var(--border-radius-sm);
+                    cursor: pointer;
+                    border: 1px solid var(--border-color);
+                    background: var(--bg-card);
+                    min-height: 38px;
+                }
+                .pic-display:hover {
+                    border-color: var(--primary, #3b82f6);
+                }
+                .pic-display img {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 50%;
+                    object-fit: cover;
+                }
+                .pic-dropdown-search input {
+                    width: 100%;
+                    padding: 5px 8px;
+                    border: 1px solid var(--border-color);
+                    border-radius: 4px;
+                    outline: none;
+                    font-size: 0.8rem;
+                    background: var(--bg-sidebar, var(--bg-card));
+                    color: var(--text-primary);
+                }
+                .pic-option {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 6px 10px;
+                    cursor: pointer;
+                    transition: background 0.15s;
+                }
+                .pic-option:hover {
+                    background: var(--bg-hover, rgba(59,130,246,0.08));
+                }
+                .pic-option.selected {
+                    background: rgba(59,130,246,0.12);
+                }
+                .pic-option img {
+                    width: 24px;
+                    height: 24px;
+                    border-radius: 50%;
+                    object-fit: cover;
+                }
+                .pic-option-info {
+                    flex: 1;
+                    min-width: 0;
+                }
+                .pic-option-name {
+                    font-size: 0.8rem;
+                    font-weight: 500;
+                    color: var(--text-primary);
+                }
+                .pic-option-email {
+                    font-size: 0.7rem;
+                    color: var(--text-secondary);
+                }
+            </style>
             <div class="will-animate">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;">
                     <div>
@@ -30,6 +96,12 @@ window.App.views.timeline = {
     },
 
     async afterRender() {
+        this.larkUsers = [];
+        try {
+            this.larkUsers = await window.App.api.getLarkUsers();
+        } catch (err) {
+            console.error('Error loading Lark users', err);
+        }
         this.bindEvents();
         await this.loadTimelines();
     },
@@ -113,12 +185,38 @@ window.App.views.timeline = {
                 const html = document.createElement('div');
                 html.className = 'card';
                 html.innerHTML = `
-                    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 16px;">
-                        <div>
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; width: 100%;">
+                        <div style="flex: 1; min-width: 250px;">
                             <h3 style="margin-bottom:8px;">${projectName}</h3>
-                            <p class="text-secondary" style="margin:0;">Record ID: <code style="font-size:0.85rem;">${recordId}</code>${projectOwner ? ` • Owner: ${projectOwner}` : ''}${projectBrand ? ` • Brand: ${projectBrand}` : ''}</p>
+                            <p class="text-secondary" style="margin:0; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;">
+                                <span>Record ID: <code style="font-size:0.85rem;">${recordId}</code></span>
+                                ${projectOwner ? `<span>• Owner: ${projectOwner}</span>` : ''}
+                                ${projectBrand ? `<span>• Brand: ${projectBrand}</span>` : ''}
+                            </p>
                         </div>
-                        <span class="badge" style="background: rgba(59, 130, 246, 0.12); color: var(--primary);">14-day default timeline</span>
+                        <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+                            <!-- PIC Section -->
+                            <div class="pic-cell" data-record-id="${recordId}" style="position: relative; min-width: 200px;">
+                                <div class="pic-display" id="picDisplay-${recordId}">
+                                    ${group.project.pic ? `
+                                        <div style="display: flex; align-items: center; gap: 8px;">
+                                            <img src="${this.getAvatarForUser(group.project.pic)}" style="width: 22px; height: 22px; border-radius: 50%; object-fit: cover;" onerror="this.src='${this.renderUserAvatar(group.project.pic)}'" />
+                                            <span style="font-size: 0.85rem; font-weight: 500; color: var(--text-primary);">${group.project.pic}</span>
+                                        </div>
+                                    ` : `
+                                        <span style="color: var(--text-secondary); font-size: 0.85rem; font-style: italic;">Belum ada PIC</span>
+                                    `}
+                                    <i class="uil uil-angle-down" style="color: var(--text-secondary);"></i>
+                                </div>
+                                <div class="pic-dropdown" id="picDropdown-${recordId}" style="position: absolute; top: 100%; left: 0; right: 0; max-height: 200px; overflow-y: auto; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--border-radius-sm); box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 10; display: none;">
+                                    <div class="pic-dropdown-search" style="padding: 6px; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; background: var(--bg-card);">
+                                        <input type="text" placeholder="Cari PIC..." class="pic-search-input" data-record-id="${recordId}" autocomplete="off" />
+                                    </div>
+                                    <div class="pic-dropdown-list" id="picOptions-${recordId}"></div>
+                                </div>
+                            </div>
+                            <span class="badge" style="background: rgba(59, 130, 246, 0.12); color: var(--primary); height: fit-content; padding: 6px 12px;">14-day default timeline</span>
+                        </div>
                     </div>
                     <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:18px;">
                         <input type="text" class="timeline-new-task-name" data-record-id="${recordId}" placeholder="Nama task baru" style="flex:1; min-width:220px; padding: 10px; border: 1px solid var(--border-color); border-radius: var(--border-radius-sm);" />
@@ -246,6 +344,11 @@ window.App.views.timeline = {
                 });
             });
 
+            // Bind PIC dropdowns for each group
+            filteredTimelines.forEach(group => {
+                this.initPicDropdown(group.record_id, group.project.pic);
+            });
+
         } catch (err) {
             container.innerHTML = `
                 <div class="card" style="text-align:center; color: var(--danger);">
@@ -253,5 +356,111 @@ window.App.views.timeline = {
                 </div>
             `;
         }
+    },
+
+    getAvatarForUser(name) {
+        const found = this.larkUsers.find(u => u.name === name);
+        return found?.avatar || this.renderUserAvatar(name);
+    },
+
+    renderUserAvatar(name) {
+        return 'https://ui-avatars.com/api/?name=' + encodeURIComponent(name) + '&background=3b82f6&color=fff&size=60';
+    },
+
+    initPicDropdown(recordId, currentPic) {
+        const displayEl = document.getElementById(`picDisplay-${recordId}`);
+        const dropdown = document.getElementById(`picDropdown-${recordId}`);
+        const searchInput = document.querySelector(`.pic-search-input[data-record-id="${recordId}"]`);
+        const listContainer = document.getElementById(`picOptions-${recordId}`);
+
+        if (!displayEl || !dropdown || !listContainer) return;
+
+        const renderOptions = (filter = '') => {
+            const filtered = filter
+                ? this.larkUsers.filter(u => u.name.toLowerCase().includes(filter) || (u.email && u.email.toLowerCase().includes(filter)))
+                : this.larkUsers;
+
+            let htmlStr = '';
+            
+            // Add a "Clear PIC" option
+            htmlStr += `
+                <div class="pic-option ${!currentPic ? 'selected' : ''}" data-user-name="" data-avatar="">
+                    <div class="pic-option-info">
+                        <div class="pic-option-name" style="font-style: italic; color: var(--text-secondary);">Unassign PIC</div>
+                    </div>
+                </div>
+            `;
+
+            htmlStr += filtered.map(user => {
+                const avatarSrc = user.avatar || this.renderUserAvatar(user.name);
+                const isSelected = user.name === currentPic;
+                return `
+                    <div class="pic-option ${isSelected ? 'selected' : ''}" data-user-name="${user.name}" data-avatar="${avatarSrc}">
+                        <img src="${avatarSrc}" alt="" onerror="this.src='${this.renderUserAvatar(user.name)}'" />
+                        <div class="pic-option-info">
+                            <div class="pic-option-name">${user.name}</div>
+                            ${user.email ? `<div class="pic-option-email">${user.email}</div>` : ''}
+                        </div>
+                        ${isSelected ? '<i class="uil uil-check" style="color: var(--primary, #3b82f6);"></i>' : ''}
+                    </div>
+                `;
+            }).join('');
+
+            listContainer.innerHTML = htmlStr;
+
+            // Bind click to each option
+            listContainer.querySelectorAll('.pic-option').forEach(opt => {
+                opt.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const userName = opt.dataset.userName;
+
+                    displayEl.innerHTML = `
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 0.85rem; color: var(--text-secondary);">Saving...</span>
+                        </div>
+                    `;
+                    dropdown.style.display = 'none';
+
+                    try {
+                        await window.App.api.setProjectPic(recordId, userName || null);
+                        await this.loadTimelines();
+                    } catch (err) {
+                        alert('Gagal menyimpan PIC: ' + err.message);
+                        await this.loadTimelines();
+                    }
+                });
+            });
+        };
+
+        // Open/Close dropdown
+        displayEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // Close all other dropdowns first
+            document.querySelectorAll('.pic-dropdown').forEach(d => {
+                if (d !== dropdown) d.style.display = 'none';
+            });
+
+            const isShown = dropdown.style.display === 'block';
+            dropdown.style.display = isShown ? 'none' : 'block';
+            if (!isShown && searchInput) {
+                searchInput.value = '';
+                renderOptions();
+                setTimeout(() => searchInput.focus(), 50);
+            }
+        });
+
+        // Search input
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                e.stopPropagation();
+                renderOptions(searchInput.value.trim().toLowerCase());
+            });
+            searchInput.addEventListener('click', (e) => e.stopPropagation());
+        }
+
+        // Close on click outside
+        document.addEventListener('click', () => {
+            if (dropdown) dropdown.style.display = 'none';
+        });
     }
 };

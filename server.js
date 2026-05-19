@@ -389,11 +389,10 @@ const getAllProjectRecords = async (appToken, token) => {
     return await fetchAllBitableRecords(appToken, table_id, token);
 };
 
-const createDefaultTimelineTasks = (recordId) => new Promise((resolve, reject) => {
-    const now = new Date();
+const createDefaultTimelineTasks = (recordId, baseDate = new Date()) => new Promise((resolve, reject) => {
     const stmt = db.prepare('INSERT INTO project_timelines (record_id, task_name, due_date, status, order_index) VALUES (?, ?, ?, ?, ?)');
     DEFAULT_TIMELINE_TASKS.forEach(task => {
-        const dueDate = new Date(now.getTime() + task.days * 24 * 60 * 60 * 1000);
+        const dueDate = new Date(baseDate.getTime() + task.days * 24 * 60 * 60 * 1000);
         const formatted = dueDate.toISOString().split('T')[0];
         stmt.run([recordId, task.task_name, formatted, 'Pending', task.order_index]);
     });
@@ -403,12 +402,24 @@ const createDefaultTimelineTasks = (recordId) => new Promise((resolve, reject) =
     });
 });
 
-const ensureTimelineForProject = (recordId) => new Promise((resolve, reject) => {
+const ensureTimelineForProject = (recordOrId, defaultFields = {}) => new Promise((resolve, reject) => {
+    const recordId = typeof recordOrId === 'object' ? recordOrId.record_id : recordOrId;
+    const fields = typeof recordOrId === 'object' ? (recordOrId.fields || {}) : defaultFields;
+
     db.get('SELECT COUNT(*) AS count FROM project_timelines WHERE record_id = ?', [recordId], async (err, row) => {
         if (err) return reject(err);
         if (row && row.count > 0) return resolve();
         try {
-            await createDefaultTimelineTasks(recordId);
+            // Find base date from handover fields
+            let baseDate = new Date();
+            const handoverDateRaw = fields['New Logo Won Date'] || fields['Service Start Date'];
+            if (handoverDateRaw) {
+                const parsed = new Date(handoverDateRaw);
+                if (!isNaN(parsed.getTime())) {
+                    baseDate = parsed;
+                }
+            }
+            await createDefaultTimelineTasks(recordId, baseDate);
             resolve();
         } catch (error) {
             reject(error);
@@ -447,47 +458,152 @@ app.get('/api/lark-users', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Failed to authenticate with Lark', details: authData });
         }
 
-        // Fetch users from root department (department_id=0 = all users)
+        const token = authData.tenant_access_token;
         let allUsers = [];
-        let pageToken = '';
-        let hasMore = true;
+        let fetchedFromScope = false;
 
-        while (hasMore) {
-            const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/find_by_department');
-            url.searchParams.append('department_id', '0');
-            url.searchParams.append('page_size', '50');
-            if (pageToken) url.searchParams.append('page_token', pageToken);
-
-            const usersRes = await fetch(url.toString(), {
+        // First, fetch the scope of contact permissions
+        try {
+            const scopeRes = await fetch('https://open.larksuite.com/open-apis/contact/v3/scopes?user_id_type=open_id', {
                 method: 'GET',
-                headers: { 'Authorization': `Bearer ${authData.tenant_access_token}` }
+                headers: { 'Authorization': `Bearer ${token}` }
             });
-            const usersData = await usersRes.json();
+            const scopeData = await scopeRes.json();
 
-            if (usersData.code !== 0) {
-                console.error('Lark users API error:', usersData);
-                return res.status(400).json({
-                    error: 'Failed to fetch users from Lark. Make sure the app has "Read Contacts" permission.',
-                    details: usersData
+            if (scopeData.code === 0 && scopeData.data) {
+                const { user_ids, department_ids } = scopeData.data;
+
+                // If there are specific users authorized
+                if (user_ids && user_ids.length > 0) {
+                    fetchedFromScope = true;
+                    // Batch fetch user details (max 50 per batch)
+                    const batchSize = 50;
+                    for (let i = 0; i < user_ids.length; i += batchSize) {
+                        const chunk = user_ids.slice(i, i + batchSize);
+                        const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/batch');
+                        url.searchParams.append('user_id_type', 'open_id');
+                        chunk.forEach(id => url.searchParams.append('user_ids', id));
+
+                        const batchRes = await fetch(url.toString(), {
+                            headers: { 'Authorization': `Bearer ${token}` }
+                        });
+                        const batchData = await batchRes.json();
+                        if (batchData.code === 0 && batchData.data && batchData.data.items) {
+                            allUsers = allUsers.concat(batchData.data.items.map(user => ({
+                                user_id: user.user_id,
+                                name: user.name,
+                                email: user.email || '',
+                                avatar: user.avatar?.avatar_72 || user.avatar?.avatar_origin || '',
+                                department: user.department_ids?.[0] || ''
+                            })));
+                        }
+                    }
+                }
+
+                // If there are specific departments authorized
+                if (department_ids && department_ids.length > 0) {
+                    fetchedFromScope = true;
+                    for (const deptId of department_ids) {
+                        let pageToken = '';
+                        let hasMore = true;
+                        while (hasMore) {
+                            const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/find_by_department');
+                            url.searchParams.append('department_id', deptId);
+                            url.searchParams.append('page_size', '50');
+                            url.searchParams.append('user_id_type', 'open_id');
+                            if (pageToken) url.searchParams.append('page_token', pageToken);
+
+                            const usersRes = await fetch(url.toString(), {
+                                method: 'GET',
+                                headers: { 'Authorization': `Bearer ${token}` }
+                            });
+                            const usersData = await usersRes.json();
+                            if (usersData.code === 0 && usersData.data) {
+                                const items = usersData.data.items || [];
+                                allUsers = allUsers.concat(items.map(user => ({
+                                    user_id: user.user_id,
+                                    name: user.name,
+                                    email: user.email || '',
+                                    avatar: user.avatar?.avatar_72 || user.avatar?.avatar_origin || '',
+                                    department: user.department_ids?.[0] || ''
+                                })));
+                                hasMore = usersData.data.has_more || false;
+                                pageToken = usersData.data.page_token || '';
+                            } else {
+                                hasMore = false;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (scopeErr) {
+            console.error('Error fetching contact scopes:', scopeErr);
+        }
+
+        // If we didn't fetch from scopes (or as a fallback), try department 0
+        if (!fetchedFromScope || allUsers.length === 0) {
+            let pageToken = '';
+            let hasMore = true;
+            let dept0Error = null;
+
+            while (hasMore) {
+                const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/find_by_department');
+                url.searchParams.append('department_id', '0');
+                url.searchParams.append('page_size', '50');
+                url.searchParams.append('user_id_type', 'open_id');
+                if (pageToken) url.searchParams.append('page_token', pageToken);
+
+                const usersRes = await fetch(url.toString(), {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${token}` }
                 });
+                const usersData = await usersRes.json();
+
+                if (usersData.code !== 0) {
+                    dept0Error = usersData;
+                    hasMore = false;
+                    break;
+                }
+
+                const items = usersData.data?.items || [];
+                allUsers = allUsers.concat(items.map(user => ({
+                    user_id: user.user_id,
+                    name: user.name,
+                    email: user.email || '',
+                    avatar: user.avatar?.avatar_72 || user.avatar?.avatar_origin || '',
+                    department: user.department_ids?.[0] || ''
+                })));
+
+                hasMore = usersData.data?.has_more || false;
+                pageToken = usersData.data?.page_token || '';
             }
 
-            const items = usersData.data?.items || [];
-            allUsers = allUsers.concat(items.map(user => ({
-                user_id: user.user_id,
-                name: user.name,
-                email: user.email || '',
-                avatar: user.avatar?.avatar_72 || user.avatar?.avatar_origin || '',
-                department: user.department_ids?.[0] || ''
-            })));
+            if (allUsers.length === 0 && dept0Error) {
+                console.error('Lark users API error:', dept0Error);
+                let friendlyMsg = 'Failed to fetch users from Lark.';
+                if (dept0Error.code === 40004) {
+                    friendlyMsg += ' Error "no dept authority" (40004). Pastikan di Lark Developer Console -> Permissions & Scopes -> Contacts, opsi "Data Access Range" sudah diubah ke "All members" (Semua anggota), lalu BUAT VERSI BARU dan RILIS/PUBLISH aplikasi agar perubahan efek.';
+                }
+                return res.status(400).json({
+                    error: friendlyMsg,
+                    details: dept0Error
+                });
+            }
+        }
 
-            hasMore = usersData.data?.has_more || false;
-            pageToken = usersData.data?.page_token || '';
+        // De-duplicate users by user_id
+        const uniqueUsers = [];
+        const seen = new Set();
+        for (const u of allUsers) {
+            if (!seen.has(u.user_id)) {
+                seen.add(u.user_id);
+                uniqueUsers.push(u);
+            }
         }
 
         // Cache the results
-        larkUsersCache = { data: allUsers, timestamp: Date.now() };
-        res.json({ data: allUsers });
+        larkUsersCache = { data: uniqueUsers, timestamp: Date.now() };
+        res.json({ data: uniqueUsers });
 
     } catch (err) {
         console.error('Error fetching Lark users:', err);
@@ -654,28 +770,39 @@ app.get('/api/timelines', async (req, res) => {
         }
 
         const records = await getAllProjectRecords(app_token, authData.tenant_access_token);
-        await Promise.all(records.map(record => ensureTimelineForProject(record.record_id)));
+        await Promise.all(records.map(record => ensureTimelineForProject(record)));
 
-        db.all('SELECT * FROM project_timelines ORDER BY record_id, order_index', [], (err, rows) => {
+        db.all('SELECT record_id, pic FROM project_pics', [], (err, picRows) => {
             if (err) return res.status(500).json({ error: err.message });
-            const grouped = {};
-            rows.forEach(row => {
-                if (!grouped[row.record_id]) grouped[row.record_id] = [];
-                grouped[row.record_id].push(row);
+            
+            const picMap = {};
+            picRows.forEach(r => picMap[r.record_id] = r.pic);
+
+            db.all('SELECT * FROM project_timelines ORDER BY record_id, order_index', [], (err, rows) => {
+                if (err) return res.status(500).json({ error: err.message });
+                const grouped = {};
+                rows.forEach(row => {
+                    if (!grouped[row.record_id]) grouped[row.record_id] = [];
+                    grouped[row.record_id].push(row);
+                });
+
+                const projectMap = {};
+                records.forEach(record => {
+                    projectMap[record.record_id] = {
+                        record_id: record.record_id,
+                        fields: record.fields || {},
+                        pic: picMap[record.record_id] || ''
+                    };
+                });
+
+                const data = Object.keys(grouped).map(recordId => ({
+                    record_id: recordId,
+                    project: projectMap[recordId] || { record_id: recordId, fields: {}, pic: picMap[recordId] || '' },
+                    tasks: grouped[recordId]
+                }));
+
+                res.json({ data });
             });
-
-            const projectMap = {};
-            records.forEach(record => {
-                projectMap[record.record_id] = { record_id: record.record_id, fields: record.fields || {} };
-            });
-
-            const data = Object.keys(grouped).map(recordId => ({
-                record_id: recordId,
-                project: projectMap[recordId] || { record_id: recordId, fields: {} },
-                tasks: grouped[recordId]
-            }));
-
-            res.json({ data });
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
