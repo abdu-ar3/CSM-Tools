@@ -189,5 +189,18 @@ window.App.api = {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Failed to sync');
         return data;
+    },
+
+    async getChurnActivity() {
+        try {
+            const response = await fetch(`${API_URL}/churn-activity`);
+            if (!response.ok) throw new Error('Failed to fetch churn activity');
+            const data = await response.json();
+            return data.data;
+        } catch (error) {
+            console.error(error);
+            return [];
+        }
     }
 };
+

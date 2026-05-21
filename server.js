@@ -79,6 +79,19 @@ app.get('/login', (req, res) => {
   res.sendFile(path.join(__dirname, 'login.html'));
 });
 
+// Local dev bypass route
+app.get('/login-dev', (req, res) => {
+  req.session.user = {
+    id: 'dev-user',
+    name: 'Developer User',
+    email: 'dev@example.com',
+    avatar: 'https://ui-avatars.com/api/?name=Dev+User&background=10b981&color=fff',
+    accessToken: 'mock-token'
+  };
+  res.redirect('/');
+});
+
+
 // Lark OAuth routes
 // Step 1: Redirect user to Lark authorization page
 app.get('/auth/lark', (req, res) => {
@@ -749,6 +762,68 @@ app.get('/api/projects', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// API: Get Lark Churn Activity records
+app.get('/api/churn-activity', async (req, res) => {
+    try {
+        const config = await getConfig();
+        if(!config.lark_app_id || !config.lark_app_secret || !config.lark_base_link) {
+            return res.status(400).json({ error: "Lark Configuration is incomplete" });
+        }
+
+        const app_token = getAppTokenFromUrl(config.lark_base_link);
+        const authRes = await fetch("https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                app_id: config.lark_app_id,
+                app_secret: config.lark_app_secret
+            })
+        });
+        const authData = await authRes.json();
+        if (!authData.tenant_access_token) {
+            return res.status(400).json({ error: "Failed to authenticate with Lark", details: authData });
+        }
+
+        const tablesRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables`, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${authData.tenant_access_token}` }
+        });
+        const tablesData = await tablesRes.json();
+        if (tablesData.code !== 0) {
+            return res.status(400).json({ error: "Failed to fetch tables list from Lark. Check Base access.", details: tablesData });
+        }
+
+        // Try to find "Churn Activity" table, fallback to "New Summary"
+        let table_id = findTableIdByName(tablesData.data, 'Churn Activity');
+        if (!table_id) {
+            console.log("Could not locate 'Churn Activity' table, falling back to 'New Summary'.");
+            table_id = findTableIdByName(tablesData.data, 'New Summary');
+        }
+
+        if (!table_id) {
+            return res.status(400).json({ error: "Could not locate 'Churn Activity' or 'New Summary' table in your Lark Base." });
+        }
+
+        const records = await fetchAllBitableRecords(app_token, table_id, authData.tenant_access_token);
+
+        db.all('SELECT record_id, pic FROM project_pics', [], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            const picMap = {};
+            rows.forEach(row => picMap[row.record_id] = row.pic);
+
+            const normalized = records.map(record => ({
+                record_id: record.record_id,
+                fields: record.fields || {},
+                pic: picMap[record.record_id] || ''
+            }));
+            res.json({ data: normalized });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 
 // API: Get all timelines and ensure default timeline exists for each project
 app.get('/api/timelines', async (req, res) => {
