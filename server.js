@@ -51,6 +51,9 @@ function requireAuth(req, res, next) {
   if (req.session && req.session.user) {
     return next();
   }
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized. Please refresh the page to login again.' });
+  }
   res.redirect('/login');
 }
 
@@ -228,54 +231,624 @@ app.post('/api/clients', requireAuth, (req, res) => {
     });
 });
 
-// API: Get customer issues
-app.get('/api/issues', requireAuth, (req, res) => {
-    db.all('SELECT * FROM customer_issues ORDER BY updated_at DESC', [], (err, rows) => {
-        if (err) {
-            return res.status(500).json({ error: err.message });
-        }
-        res.json({ data: rows });
-    });
+// API: Get customer issues with 2-way sync
+app.get('/api/issues', requireAuth, async (req, res) => {
+    try {
+        const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+        const tableId = await getOrCreateIssueTable(app_token, token);
+
+        // 1. Fetch all records from Lark Bitable
+        const allLarkRecords = await fetchAllBitableRecords(app_token, tableId, token);
+        
+        // Sync all records that have a record_id
+        const larkRecords = allLarkRecords.filter(record => record.record_id);
+
+        // 2. Fetch all local issues from SQLite
+        db.all('SELECT * FROM customer_issues', [], async (err, localIssues) => {
+            if (err) {
+                return res.status(500).json({ error: err.message });
+            }
+
+            const localIssuesMapByRecordId = {};
+            const localIssuesMapById = {};
+            localIssues.forEach(issue => {
+                if (issue.record_id) {
+                    localIssuesMapByRecordId[issue.record_id] = issue;
+                }
+                localIssuesMapById[issue.id] = issue;
+            });
+
+            const processedRecordIds = new Set();
+
+            // 3. Reconcile from Lark to SQLite
+            for (const record of larkRecords) {
+                const recordId = record.record_id;
+                processedRecordIds.add(recordId);
+
+                const fields = record.fields || {};
+                const idVal = (fields["id"] && fields["id"][0]) ? (fields["id"][0].text || "") : "";
+                const title = fields["issue_needs"] || idVal || `Issue #${recordId}`;
+                const customer = (fields["customer"] && fields["customer"][0]) ? (fields["customer"][0].text || "") : "";
+                const description = ""; // No description field in new Base
+                
+                // Resolve Lookup status
+                const status = resolveStatusOption(fields["status"]);
+                
+                // Assigned to / handler (type 11 User/People field)
+                let assigned_to = "";
+                if (fields["csm_handler"]) {
+                    if (Array.isArray(fields["csm_handler"])) {
+                        assigned_to = fields["csm_handler"][0]?.name || "";
+                    } else if (typeof fields["csm_handler"] === 'object') {
+                        assigned_to = fields["csm_handler"].name || "";
+                    }
+                }
+
+                // Priority / Prioritas
+                const priority = fields["Priority"] || fields["Prioritas"] || "Medium";
+
+                // Feature (Multi-Select array)
+                const feature = fields["feature"] ? fields["feature"].join(', ') : "";
+
+                let createdAtStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
+                if (fields["date_time_created"]) {
+                    createdAtStr = new Date(fields["date_time_created"]).toISOString().replace('T', ' ').substring(0, 19);
+                }
+
+                const existingLocal = localIssuesMapByRecordId[recordId];
+
+                if (existingLocal) {
+                    // Update SQLite if different
+                    if (
+                        existingLocal.title !== title ||
+                        existingLocal.customer !== customer ||
+                        existingLocal.status !== status ||
+                        existingLocal.assigned_to !== assigned_to ||
+                        existingLocal.priority !== priority ||
+                        existingLocal.feature !== feature
+                    ) {
+                        db.run(
+                            `UPDATE customer_issues SET title = ?, customer = ?, description = ?, status = ?, assigned_to = ?, priority = ?, feature = ?, updated_at = CURRENT_TIMESTAMP WHERE record_id = ?`,
+                            [title, customer, description, status, assigned_to, priority, feature, recordId]
+                        );
+                    }
+                } else {
+                    // Insert new record from Lark
+                    db.run(
+                        `INSERT INTO customer_issues (title, customer, description, status, priority, feature, assigned_to, record_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [title, customer, description, status, priority, feature, assigned_to, recordId, createdAtStr]
+                    );
+                }
+            }
+
+            // 4. Delete local records that were deleted in Lark
+            for (const issue of localIssues) {
+                if (issue.record_id && !processedRecordIds.has(issue.record_id)) {
+                    db.run(`DELETE FROM customer_issues WHERE record_id = ?`, [issue.record_id]);
+                }
+            }
+
+            // 5. Push local records that don't have a record_id to Lark
+            for (const issue of localIssues) {
+                if (!issue.record_id && issue.title && issue.title.trim()) {
+                    try {
+                        let customerLink = null;
+                        if (issue.customer) {
+                            const customerRecords = await fetchAllBitableRecords(app_token, "tblI6SU7PKWwFqZy", token);
+                            const customerRecord = customerRecords.find(r => r.fields?.customer === issue.customer);
+                            if (customerRecord) {
+                                customerLink = [customerRecord.record_id];
+                            }
+                        }
+
+                        let csmHandlerVal = null;
+                        if (issue.assigned_to) {
+                            const usersList = await getLarkUsersList(token);
+                            const matchedUser = usersList.find(u => u.name === issue.assigned_to);
+                            if (matchedUser) {
+                                csmHandlerVal = [{ id: matchedUser.user_id }];
+                            }
+                        }
+
+                        let featureVal = null;
+                        if (issue.feature) {
+                            const fText = issue.feature.trim();
+                            featureVal = [FEATURE_MAPPING_TO_LARK[fText] || fText];
+                        }
+
+                        // Create issue in main table
+                        const createRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/${tableId}/records?user_id_type=open_id`, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${token}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                fields: {
+                                    "issue_needs": issue.title,
+                                    "customer": customerLink,
+                                    "feature": featureVal,
+                                    "Priority": issue.priority || "Medium",
+                                    "csm_handler": csmHandlerVal
+                                }
+                            })
+                        });
+                        const createData = await createRes.json();
+                        if (createData.code === 0 && createData.data?.record?.record_id) {
+                            const newRecordId = createData.data.record.record_id;
+                            db.run(`UPDATE customer_issues SET record_id = ? WHERE id = ?`, [newRecordId, issue.id]);
+
+                            // Create initial activity log to set status
+                            await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/tblQ6xjAGaCmzRqh/records`, {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': `Bearer ${token}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    fields: {
+                                        "issue_needs_handling": [newRecordId],
+                                        "status": issue.status || "Open",
+                                        "activity": "Issue created via CSM Tools"
+                                    }
+                                })
+                            });
+                        }
+                    } catch (pushErr) {
+                        console.error('Failed to push offline issue to Lark:', pushErr);
+                    }
+                }
+            }
+
+            // Return latest state from database
+            db.all('SELECT * FROM customer_issues ORDER BY created_at DESC', [], (err, syncedRows) => {
+                if (err) {
+                    return res.status(500).json({ error: err.message });
+                }
+                res.json({ data: syncedRows });
+            });
+        });
+
+    } catch (err) {
+        console.error('Error syncing issues with Lark:', err);
+        // Fallback: return local issues if Lark is offline or config is incomplete
+        db.all('SELECT * FROM customer_issues ORDER BY created_at DESC', [], (dbErr, rows) => {
+            if (dbErr) {
+                return res.status(500).json({ error: dbErr.message });
+            }
+            res.json({ data: rows, warning: 'Failed to sync with Lark: ' + err.message });
+        });
+    }
 });
 
-// API: Create customer issue
-app.post('/api/issues', requireAuth, (req, res) => {
-    const { title, customer, description, status, priority, assigned_to } = req.body;
-    const sql = 'INSERT INTO customer_issues (title, customer, description, status, priority, assigned_to) VALUES (?, ?, ?, ?, ?, ?)';
-    const params = [title, customer, description || '', status || 'Open', priority || 'Medium', assigned_to || ''];
+// API: Create customer issue with Lark sync
+app.post('/api/issues', requireAuth, async (req, res) => {
+    const { title, customer, description, status, priority, assigned_to, feature } = req.body;
+    let record_id = null;
+
+    try {
+        const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+        const tableId = await getOrCreateIssueTable(app_token, token);
+
+        // Find customer link record ID
+        let customerLink = null;
+        if (customer) {
+            const customerRecords = await fetchAllBitableRecords(app_token, "tblI6SU7PKWwFqZy", token);
+            const customerRecord = customerRecords.find(r => r.fields?.customer === customer);
+            if (customerRecord) {
+                customerLink = [customerRecord.record_id];
+            }
+        }
+
+        // Map assigned_to (csm_handler)
+        let csmHandlerVal = null;
+        if (assigned_to) {
+            const usersList = await getLarkUsersList(token);
+            const matchedUser = usersList.find(u => u.name === assigned_to);
+            if (matchedUser) {
+                csmHandlerVal = [{ id: matchedUser.user_id }];
+            }
+        }
+
+        // Map feature
+        let featureVal = null;
+        if (feature) {
+            const fText = feature.trim();
+            featureVal = [FEATURE_MAPPING_TO_LARK[fText] || fText];
+        }
+
+        // Create issue in main table
+        const createRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/${tableId}/records?user_id_type=open_id`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                fields: {
+                    "issue_needs": title,
+                    "customer": customerLink,
+                    "feature": featureVal,
+                    "Priority": priority || "Medium",
+                    "csm_handler": csmHandlerVal
+                }
+            })
+        });
+        const createData = await createRes.json();
+        if (createData.code === 0 && createData.data?.record?.record_id) {
+            record_id = createData.data.record.record_id;
+
+            // Create initial activity log to set status
+            await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/tblQ6xjAGaCmzRqh/records`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    fields: {
+                        "issue_needs_handling": [record_id],
+                        "status": status || "Open",
+                        "activity": "Issue created via CSM Tools"
+                    }
+                })
+            });
+        } else {
+            console.error('Failed to create record in Lark:', createData);
+        }
+    } catch (err) {
+        console.error('Error creating issue in Lark, fallback to local only:', err);
+    }
+
+    const sql = 'INSERT INTO customer_issues (title, customer, description, status, priority, feature, assigned_to, record_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+    const params = [title, customer, description || '', status || 'Open', priority || 'Medium', feature || '', assigned_to || '', record_id];
 
     db.run(sql, params, function (err) {
         if (err) {
             return res.status(400).json({ error: err.message });
         }
-        res.json({ message: 'success', data: { id: this.lastID, title, customer, description, status, priority, assigned_to } });
+        res.json({
+            message: 'success',
+            data: { id: this.lastID, title, customer, description, status, priority, feature, assigned_to, record_id }
+        });
     });
 });
 
-// API: Update customer issue
-app.put('/api/issues/:id', requireAuth, (req, res) => {
+// API: Update customer issue with Lark sync
+app.put('/api/issues/:id', requireAuth, async (req, res) => {
     const issueId = req.params.id;
-    const { title, customer, description, status, priority, assigned_to } = req.body;
-    const sql = `UPDATE customer_issues SET title = COALESCE(?, title), customer = COALESCE(?, customer), description = COALESCE(?, description), status = COALESCE(?, status), priority = COALESCE(?, priority), assigned_to = COALESCE(?, assigned_to), updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
-    const params = [title || null, customer || null, description || null, status || null, priority || null, assigned_to || null, issueId];
+    const { title, customer, description, status, priority, assigned_to, feature } = req.body;
 
-    db.run(sql, params, function (err) {
-        if (err) {
-            return res.status(400).json({ error: err.message });
+    // Fetch existing issue to get record_id
+    db.get('SELECT * FROM customer_issues WHERE id = ?', [issueId], async (err, issue) => {
+        if (err || !issue) {
+            return res.status(400).json({ error: err ? err.message : 'Issue not found' });
         }
-        res.json({ message: 'success' });
+
+        const updatedTitle = title !== undefined ? title : issue.title;
+        const updatedCustomer = customer !== undefined ? customer : issue.customer;
+        const updatedStatus = status !== undefined ? status : issue.status;
+        const updatedPriority = priority !== undefined ? priority : issue.priority;
+        const updatedAssignedTo = assigned_to !== undefined ? assigned_to : issue.assigned_to;
+        const updatedFeature = feature !== undefined ? feature : issue.feature;
+
+        if (issue.record_id) {
+            try {
+                const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+                const tableId = await getOrCreateIssueTable(app_token, token);
+
+                // Find customer link record ID
+                let customerLink = null;
+                if (updatedCustomer) {
+                    const customerRecords = await fetchAllBitableRecords(app_token, "tblI6SU7PKWwFqZy", token);
+                    const customerRecord = customerRecords.find(r => r.fields?.customer === updatedCustomer);
+                    if (customerRecord) {
+                        customerLink = [customerRecord.record_id];
+                    }
+                }
+
+                // Map assigned_to (csm_handler)
+                let csmHandlerVal = null;
+                if (updatedAssignedTo) {
+                    const usersList = await getLarkUsersList(token);
+                    const matchedUser = usersList.find(u => u.name === updatedAssignedTo);
+                    if (matchedUser) {
+                        csmHandlerVal = [{ id: matchedUser.user_id }];
+                    }
+                }
+
+                // Map feature
+                let featureVal = null;
+                if (updatedFeature) {
+                    const fText = updatedFeature.trim();
+                    featureVal = [FEATURE_MAPPING_TO_LARK[fText] || fText];
+                }
+
+                // Update issue in main table
+                const updateRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/${tableId}/records/${issue.record_id}?user_id_type=open_id`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        fields: {
+                            "issue_needs": updatedTitle,
+                            "customer": customerLink,
+                            "feature": featureVal,
+                            "Priority": updatedPriority || "Medium",
+                            "csm_handler": csmHandlerVal
+                        }
+                    })
+                });
+                const updateData = await updateRes.json();
+                if (updateData.code !== 0) {
+                    console.error('Failed to update record in Lark:', updateData);
+                }
+
+                // If status changed, create a new activity log record
+                if (status !== undefined && status !== issue.status) {
+                    await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/tblQ6xjAGaCmzRqh/records`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            fields: {
+                                "issue_needs_handling": [issue.record_id],
+                                "status": status,
+                                "activity": `Status updated to ${status} via CSM Tools`
+                            }
+                        })
+                    });
+                }
+            } catch (err) {
+                console.error('Error updating issue in Lark:', err);
+            }
+        }
+
+        const sql = `UPDATE customer_issues SET title = COALESCE(?, title), customer = COALESCE(?, customer), description = COALESCE(?, description), status = COALESCE(?, status), priority = COALESCE(?, priority), feature = COALESCE(?, feature), assigned_to = COALESCE(?, assigned_to), updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
+        const params = [title || null, customer || null, description || null, status || null, priority || null, feature || null, assigned_to || null, issueId];
+
+        db.run(sql, params, function (err) {
+            if (err) {
+                return res.status(400).json({ error: err.message });
+            }
+            res.json({ message: 'success' });
+        });
     });
 });
 
-// API: Delete customer issue
-app.delete('/api/issues/:id', requireAuth, (req, res) => {
+// API: Delete customer issue with Lark sync
+app.delete('/api/issues/:id', requireAuth, async (req, res) => {
     const issueId = req.params.id;
-    db.run('DELETE FROM customer_issues WHERE id = ?', [issueId], function (err) {
-        if (err) {
-            return res.status(400).json({ error: err.message });
+
+    db.get('SELECT record_id FROM customer_issues WHERE id = ?', [issueId], async (err, issue) => {
+        if (err || !issue) {
+            return res.status(400).json({ error: err ? err.message : 'Issue not found' });
         }
-        res.json({ message: 'deleted', changes: this.changes });
+
+        if (issue.record_id) {
+            try {
+                const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+                const tableId = await getOrCreateIssueTable(app_token, token);
+
+                const deleteRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/${tableId}/records/${issue.record_id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                const deleteData = await deleteRes.json();
+                if (deleteData.code !== 0) {
+                    console.error('Failed to delete record in Lark:', deleteData);
+                }
+            } catch (err) {
+                console.error('Error deleting issue in Lark:', err);
+            }
+        }
+
+        db.run('DELETE FROM customer_issues WHERE id = ?', [issueId], function (err) {
+            if (err) {
+                return res.status(400).json({ error: err.message });
+            }
+            res.json({ message: 'deleted', changes: this.changes });
+        });
     });
+});
+
+// API: Get all issue activities from Lark for the dashboard summary
+app.get('/api/issues-activities', requireAuth, async (req, res) => {
+    try {
+        const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+        const allActivityRecords = await fetchAllBitableRecords(app_token, "tblQ6xjAGaCmzRqh", token);
+
+        const mappedActivities = allActivityRecords.map(record => {
+            const fields = record.fields || {};
+            const handler = fields.modified_csm_handler || {};
+
+            return {
+                id: record.record_id,
+                activity_id: fields.id || `ACT-${record.record_id.substring(0, 5)}`,
+                issue_title: (fields.issue_needs_handling && fields.issue_needs_handling[0]) ? (fields.issue_needs_handling[0].text || "Untitled Issue") : "Untitled Issue",
+                customer: (fields.customer && fields.customer[0]) ? (fields.customer[0].text || "No Customer") : "No Customer",
+                activity: fields.activity || '',
+                status: fields.status || 'Open',
+                evidence_link: fields.modified_link_attachment?.link || null,
+                handler_name: handler.name || 'System / API',
+                handler_avatar: handler.avatar_url || null,
+                created_at: fields["Date Created"] ? new Date(fields["Date Created"]).toISOString() : new Date().toISOString()
+            };
+        });
+
+        // Sort by created_at descending (newest first)
+        mappedActivities.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+        res.json({ data: mappedActivities });
+    } catch (err) {
+        console.error('Error fetching all activities from Lark:', err);
+        res.status(500).json({ error: 'Failed to fetch all activities from Lark: ' + err.message });
+    }
+});
+
+// API: Get activities for a specific issue from Lark
+app.get('/api/issues/:id/activities', requireAuth, async (req, res) => {
+    const issueId = req.params.id;
+
+    db.get('SELECT record_id FROM customer_issues WHERE id = ?', [issueId], async (err, issue) => {
+        if (err || !issue) {
+            return res.status(404).json({ error: err ? err.message : 'Issue not found locally' });
+        }
+
+        if (!issue.record_id) {
+            // No record_id, issue is offline or not synced yet. Return empty array.
+            return res.json({ data: [] });
+        }
+
+        try {
+            const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+            // Fetch all records from the activity table (tblQ6xjAGaCmzRqh)
+            const allActivityRecords = await fetchAllBitableRecords(app_token, "tblQ6xjAGaCmzRqh", token);
+
+            // Filter activities where issue_needs_handling link matches our issue record_id
+            const filteredActivities = allActivityRecords.filter(record => {
+                const links = record.fields?.issue_needs_handling;
+                if (!links) return false;
+                if (Array.isArray(links)) {
+                    return links.some(link => {
+                        if (typeof link === 'string') return link === issue.record_id;
+                        if (link && link.record_ids) {
+                            return link.record_ids.includes(issue.record_id);
+                        }
+                        return false;
+                    });
+                }
+                return false;
+            });
+
+            // Map to client-friendly format
+            const mappedActivities = filteredActivities.map(record => {
+                const fields = record.fields || {};
+                
+                // Get handler info
+                const handler = fields.modified_csm_handler || {};
+                
+                return {
+                    id: record.record_id,
+                    activity_id: fields.id || `ACT-${record.record_id.substring(0, 5)}`,
+                    activity: fields.activity || '',
+                    status: fields.status || 'Open',
+                    evidence_link: fields.modified_link_attachment?.link || null,
+                    handler_name: handler.name || 'System / API',
+                    handler_avatar: handler.avatar_url || null,
+                    created_at: fields["Date Created"] ? new Date(fields["Date Created"]).toISOString() : new Date().toISOString()
+                };
+            });
+
+            // Sort by created_at descending (newest first)
+            mappedActivities.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            res.json({ data: mappedActivities });
+        } catch (larkErr) {
+            console.error('Error fetching issue activities from Lark:', larkErr);
+            res.status(500).json({ error: 'Failed to fetch activities from Lark: ' + larkErr.message });
+        }
+    });
+});
+
+// API: Add activity log for a specific issue to Lark
+app.post('/api/issues/:id/activities', requireAuth, async (req, res) => {
+    const issueId = req.params.id;
+    const { activity, status, evidence_link } = req.body;
+
+    if (!activity || !status) {
+        return res.status(400).json({ error: 'Activity description and status are required' });
+    }
+
+    db.get('SELECT record_id, status FROM customer_issues WHERE id = ?', [issueId], async (err, issue) => {
+        if (err || !issue) {
+            return res.status(404).json({ error: err ? err.message : 'Issue not found locally' });
+        }
+
+        if (!issue.record_id) {
+            return res.status(400).json({ error: 'Issue is not synchronized with Lark yet. Please trigger reload or wait for sync.' });
+        }
+
+        try {
+            const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+            
+            // Build fields to insert into tblQ6xjAGaCmzRqh
+            const fields = {
+                "issue_needs_handling": [issue.record_id],
+                "activity": activity,
+                "status": status
+            };
+
+            if (evidence_link && evidence_link.trim()) {
+                fields["modified_link_attachment"] = {
+                    "link": evidence_link.trim(),
+                    "text": evidence_link.trim()
+                };
+            }
+
+            // Create record in Lark activity table
+            const createRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${app_token}/tables/tblQ6xjAGaCmzRqh/records`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ fields })
+            });
+
+            const createData = await createRes.json();
+            if (createData.code !== 0) {
+                console.error('Failed to create activity record in Lark:', createData);
+                return res.status(500).json({ error: 'Lark API error: ' + createData.msg });
+            }
+
+            // Update status in local SQLite database
+            db.run(
+                'UPDATE customer_issues SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [status, issueId],
+                (dbErr) => {
+                    if (dbErr) {
+                        console.error('Failed to update status locally:', dbErr);
+                    }
+                    res.json({ message: 'success', data: createData.data });
+                }
+            );
+        } catch (larkErr) {
+            console.error('Error posting issue activity to Lark:', larkErr);
+            res.status(500).json({ error: 'Failed to log activity to Lark: ' + larkErr.message });
+        }
+    });
+});
+
+
+// API: Get customer list from the new Base
+app.get('/api/lark-customers', requireAuth, async (req, res) => {
+    try {
+        const { app_token, token } = await getLarkClient(LARK_ISSUES_BASE_LINK);
+        const records = await fetchAllBitableRecords(app_token, "tblI6SU7PKWwFqZy", token);
+        const customers = records
+            .map(r => r.fields?.customer || "")
+            .filter(name => name && name.trim())
+            .sort((a, b) => a.localeCompare(b, 'id', { sensitivity: 'base' }));
+        
+        res.json({ data: customers });
+    } catch (err) {
+        console.error('Error fetching Lark customers:', err);
+        // Fallback: get distinct customer names from local SQLite clients database
+        db.all("SELECT DISTINCT name FROM clients", [], (dbErr, rows) => {
+            if (dbErr || !rows || rows.length === 0) {
+                return res.json({ data: ["Acme Corp", "Globex Inc", "Soylent Corp", "Initech"], warning: err.message });
+            }
+            const localCustomers = rows.map(r => r.name).sort();
+            res.json({ data: localCustomers, warning: err.message });
+        });
+    }
 });
 
 // API: Update client
@@ -350,11 +923,11 @@ const getAppTokenFromUrl = (baseUrl) => {
     return pathParts[pathParts.length - 1];
 };
 
-const findTableIdByName = (tables, targetName) => {
+const findTableIdByName = (tables, targetName, fallbackToFirst = true) => {
     if (!tables?.items?.length) return null;
     const exact = tables.items.find(t => t.name.toLowerCase() === targetName.toLowerCase());
     if (exact) return exact.table_id;
-    return tables.items[0]?.table_id || null;
+    return fallbackToFirst ? (tables.items[0]?.table_id || null) : null;
 };
 
 const fetchAllBitableRecords = async (appToken, tableId, token) => {
@@ -378,6 +951,174 @@ const fetchAllBitableRecords = async (appToken, tableId, token) => {
     return records;
 };
 
+const LARK_ISSUES_BASE_LINK = 'https://prasetia.larksuite.com/base/FMEFb23gYaAOKssYZrDuULT4sJd?from=from_copylink';
+
+const FEATURE_MAPPING_TO_LARK = {
+    "Messenger": "Messanger",
+    "Approval": "Approval",
+    "Calendar": "Calendar",
+    "Base": "Base",
+    "Meetings": "Meetings",
+    "Minutes": "Minutes",
+    "Tasks": "Tasks",
+    "Moments": "Moments",
+    "Docs": "Docs",
+    "Wiki": "Wiki",
+    "Help Desk": "Help Desk",
+    "Subscription": "Subscription",
+    "Attendance": "Attendance",
+    "OKR": "OKR",
+    "Workplace": "Workplace",
+    "e-Mail": "e-Mail",
+    "Announcement": "Announcement",
+    "Others": "Others"
+};
+
+const getLarkUsersList = async (token) => {
+    let allUsers = [];
+    try {
+        const scopeRes = await fetch('https://open.larksuite.com/open-apis/contact/v3/scopes?user_id_type=open_id', {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const scopeData = await scopeRes.json();
+        if (scopeData.code === 0 && scopeData.data) {
+            const { user_ids } = scopeData.data;
+            if (user_ids && user_ids.length > 0) {
+                const batchSize = 50;
+                for (let i = 0; i < user_ids.length; i += batchSize) {
+                    const chunk = user_ids.slice(i, i + batchSize);
+                    const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/batch');
+                    url.searchParams.append('user_id_type', 'open_id');
+                    chunk.forEach(id => url.searchParams.append('user_ids', id));
+
+                    const batchRes = await fetch(url.toString(), {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const batchData = await batchRes.json();
+                    if (batchData.code === 0 && batchData.data && batchData.data.items) {
+                        allUsers = allUsers.concat(batchData.data.items.map(u => ({ user_id: u.user_id, name: u.name })));
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error('Scope error in helper:', e);
+    }
+
+    if (allUsers.length === 0) {
+        let pageToken = '';
+        let hasMore = true;
+        while (hasMore) {
+            const url = new URL('https://open.larksuite.com/open-apis/contact/v3/users/find_by_department');
+            url.searchParams.append('department_id', '0');
+            url.searchParams.append('page_size', '50');
+            url.searchParams.append('user_id_type', 'open_id');
+            if (pageToken) url.searchParams.append('page_token', pageToken);
+
+            const usersRes = await fetch(url.toString(), {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const usersData = await usersRes.json();
+            if (usersData.code === 0 && usersData.data) {
+                const items = usersData.data.items || [];
+                allUsers = allUsers.concat(items.map(u => ({ user_id: u.user_id, name: u.name })));
+                hasMore = usersData.data.has_more || false;
+                pageToken = usersData.data.page_token || '';
+            } else {
+                hasMore = false;
+            }
+        }
+    }
+    return allUsers;
+};
+
+
+const resolveStatusOption = (statusVal) => {
+    if (Array.isArray(statusVal)) {
+        statusVal = statusVal[0];
+    }
+    if (statusVal && typeof statusVal === 'object' && statusVal.text) {
+        statusVal = statusVal.text;
+    }
+    if (statusVal === 'optFz8g3Jx') return 'Open';
+    if (statusVal === 'optnZi6eWJ') return 'In Progress';
+    if (statusVal === 'optLG3PAlH') return 'Resolved';
+    if (statusVal === 'optKP9CSEf') return 'Unresolved';
+    return statusVal || 'Open';
+};
+
+const getLarkClient = async (baseLink) => {
+    const config = await getConfig();
+    if (!config.lark_app_id || !config.lark_app_secret) {
+        throw new Error("Lark Configuration is incomplete");
+    }
+    const targetLink = baseLink || config.lark_base_link;
+    if (!targetLink) {
+        throw new Error("Lark Base Link is not configured");
+    }
+    const app_token = getAppTokenFromUrl(targetLink);
+    const authRes = await fetch("https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            app_id: config.lark_app_id,
+            app_secret: config.lark_app_secret
+        })
+    });
+    const authData = await authRes.json();
+    if (!authData.tenant_access_token) {
+        throw new Error("Failed to authenticate with Lark: " + JSON.stringify(authData));
+    }
+    return { app_token, token: authData.tenant_access_token };
+};
+
+const getOrCreateIssueTable = async (appToken, token) => {
+    const tablesRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${appToken}/tables`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const tablesData = await tablesRes.json();
+    if (tablesData.code !== 0) {
+        throw new Error('Failed to fetch tables list: ' + tablesData.msg);
+    }
+
+    const targetTableName = "Issue and Needs Handling";
+    const exact = tablesData.data?.items?.find(t => t.name.toLowerCase() === targetTableName.toLowerCase());
+    if (exact) {
+        return exact.table_id;
+    }
+
+    // Table does not exist, create it (fallback default schema)
+    console.log(`Table "${targetTableName}" not found in Lark Base. Creating...`);
+    const createRes = await fetch(`https://open.larksuite.com/open-apis/bitable/v1/apps/${appToken}/tables`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            table: {
+                name: targetTableName,
+                fields: [
+                    { field_name: "issue_needs", type: 1 },
+                    { field_name: "customer", type: 1 },
+                    { field_name: "feature", type: 1 },
+                    { field_name: "status", type: 1 },
+                    { field_name: "assigned_to", type: 1 }
+                ]
+            }
+        })
+    });
+    const createData = await createRes.json();
+    if (createData.code !== 0) {
+        throw new Error(`Failed to create table "${targetTableName}": ` + createData.msg);
+    }
+    console.log(`Table "${targetTableName}" created successfully with ID: ${createData.data.table_id}`);
+    return createData.data.table_id;
+};
+
 const DEFAULT_TIMELINE_TASKS = [
     { task_name: 'Kick off meeting', days: 1, order_index: 1 },
     { task_name: 'Training onboarding admin', days: 7, order_index: 2 },
@@ -394,9 +1135,12 @@ const getAllProjectRecords = async (appToken, token) => {
         throw new Error('Failed to fetch tables list from Lark. Check Base access.');
     }
 
-    const table_id = findTableIdByName(tablesData.data, 'New Summary');
+    let table_id = findTableIdByName(tablesData.data, 'Closed Won - Data', false);
     if (!table_id) {
-        throw new Error("Could not locate the 'New Summary' table in your Lark Base.");
+        table_id = findTableIdByName(tablesData.data, 'New Summary', true);
+    }
+    if (!table_id) {
+        throw new Error("Could not locate 'Closed Won - Data' or 'New Summary' table in your Lark Base.");
     }
 
     return await fetchAllBitableRecords(appToken, table_id, token);
@@ -620,7 +1364,21 @@ app.get('/api/lark-users', requireAuth, async (req, res) => {
 
     } catch (err) {
         console.error('Error fetching Lark users:', err);
-        res.status(500).json({ error: err.message });
+        // Fallback: return distinct assigned_to users from database + some defaults
+        db.all("SELECT DISTINCT assigned_to FROM customer_issues WHERE assigned_to IS NOT NULL AND assigned_to != ''", [], (dbErr, rows) => {
+            const usersSet = new Set(["Developer User", "Admin User", "CSM Handler"]);
+            if (!dbErr && rows) {
+                rows.forEach(r => usersSet.add(r.assigned_to));
+            }
+            const fallbackUsers = Array.from(usersSet).map((name, index) => ({
+                user_id: `fallback-${index}`,
+                name: name,
+                email: `${name.toLowerCase().replace(/\s+/g, '')}@example.com`,
+                avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=3b82f6&color=fff`,
+                department: 'Customer Success'
+            }));
+            res.json({ data: fallbackUsers, warning: err.message });
+        });
     }
 });
 
@@ -739,9 +1497,12 @@ app.get('/api/projects', async (req, res) => {
             return res.status(400).json({ error: "Failed to fetch tables list from Lark. Check Base access.", details: tablesData });
         }
 
-        const table_id = findTableIdByName(tablesData.data, 'New Summary');
+        let table_id = findTableIdByName(tablesData.data, 'Closed Won - Data', false);
         if (!table_id) {
-            return res.status(400).json({ error: "Could not locate the 'New Summary' table in your Lark Base." });
+            table_id = findTableIdByName(tablesData.data, 'New Summary', true);
+        }
+        if (!table_id) {
+            return res.status(400).json({ error: "Could not locate 'Closed Won - Data' or 'New Summary' table in your Lark Base." });
         }
 
         const records = await fetchAllBitableRecords(app_token, table_id, authData.tenant_access_token);
@@ -794,15 +1555,18 @@ app.get('/api/churn-activity', async (req, res) => {
             return res.status(400).json({ error: "Failed to fetch tables list from Lark. Check Base access.", details: tablesData });
         }
 
-        // Try to find "Churn Activity" table, fallback to "New Summary"
-        let table_id = findTableIdByName(tablesData.data, 'Churn Activity');
+        // Try to find "Churn Activity" table, fallback to "Closed Won - Data" or "New Summary"
+        let table_id = findTableIdByName(tablesData.data, 'Churn Activity', false);
         if (!table_id) {
-            console.log("Could not locate 'Churn Activity' table, falling back to 'New Summary'.");
-            table_id = findTableIdByName(tablesData.data, 'New Summary');
+            console.log("Could not locate 'Churn Activity' table, falling back to Closed Won tables.");
+            table_id = findTableIdByName(tablesData.data, 'Closed Won - Data', false);
+        }
+        if (!table_id) {
+            table_id = findTableIdByName(tablesData.data, 'New Summary', true);
         }
 
         if (!table_id) {
-            return res.status(400).json({ error: "Could not locate 'Churn Activity' or 'New Summary' table in your Lark Base." });
+            return res.status(400).json({ error: "Could not locate 'Churn Activity', 'Closed Won - Data' or 'New Summary' table in your Lark Base." });
         }
 
         const records = await fetchAllBitableRecords(app_token, table_id, authData.tenant_access_token);

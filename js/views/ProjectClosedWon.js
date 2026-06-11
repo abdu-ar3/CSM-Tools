@@ -207,7 +207,7 @@ window.App.views.projectClosedWon = {
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;">
                     <div>
                         <h2>Project Closed Won</h2>
-                        <p class="text-secondary">Menampilkan data dari Lark Base "New Summary" dan memungkinkan penetapan PIC.</p>
+                        <p class="text-secondary">Menampilkan data dari Lark Base "Closed Won - Data" / "New Summary" dan memungkinkan penetapan PIC.</p>
                     </div>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
                         <button class="btn" id="btnToggleColumns" style="background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary);"><i class="uil uil-eye"></i> Show/Hide Fields</button>

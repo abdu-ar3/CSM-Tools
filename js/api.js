@@ -88,6 +88,13 @@ window.App.api = {
         }
     },
 
+    async getLarkCustomers() {
+        const response = await fetch(`${API_URL}/lark-customers`);
+        if (!response.ok) throw new Error('Failed to fetch Lark customers');
+        const data = await response.json();
+        return data.data;
+    },
+
     async getIssues() {
         const response = await fetch(`${API_URL}/issues`);
         if (!response.ok) throw new Error('Failed to fetch customer issues');
@@ -201,6 +208,39 @@ window.App.api = {
             console.error(error);
             return [];
         }
+    },
+
+    async getAllIssueActivities() {
+        const response = await fetch(`${API_URL}/issues-activities`);
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || 'Failed to fetch all issue activities');
+        }
+        const data = await response.json();
+        return data.data;
+    },
+
+    async getIssueActivities(issueId) {
+        const response = await fetch(`${API_URL}/issues/${encodeURIComponent(issueId)}/activities`);
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || 'Failed to fetch issue activities');
+        }
+        const data = await response.json();
+        return data.data;
+    },
+
+    async createIssueActivity(issueId, activityData) {
+        const response = await fetch(`${API_URL}/issues/${encodeURIComponent(issueId)}/activities`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(activityData)
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || 'Failed to create issue activity');
+        }
+        return await response.json();
     }
 };
 

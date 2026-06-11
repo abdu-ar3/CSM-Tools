@@ -53,9 +53,33 @@ const db = new sqlite3.Database(dbPath, (err) => {
             status TEXT DEFAULT 'Open',
             priority TEXT DEFAULT 'Medium',
             assigned_to TEXT,
+            record_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
+        )`, (err) => {
+            if (err) {
+                console.error('Error creating customer_issues table', err);
+            } else {
+                db.all("PRAGMA table_info(customer_issues)", (err, rows) => {
+                    if (err) {
+                        console.error('Error checking customer_issues schema', err);
+                        return;
+                    }
+                    const hasRecordId = rows.some(column => column.name === 'record_id');
+                    if (!hasRecordId) {
+                        db.run('ALTER TABLE customer_issues ADD COLUMN record_id TEXT', (err) => {
+                            if (err) console.error('Error adding record_id column to customer_issues', err);
+                        });
+                    }
+                    const hasFeature = rows.some(column => column.name === 'feature');
+                    if (!hasFeature) {
+                        db.run('ALTER TABLE customer_issues ADD COLUMN feature TEXT', (err) => {
+                            if (err) console.error('Error adding feature column to customer_issues', err);
+                        });
+                    }
+                });
+            }
+        });
 
         db.run(`CREATE TABLE IF NOT EXISTS project_timelines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
